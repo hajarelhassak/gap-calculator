@@ -1,0 +1,515 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import pandas as pd
+from PIL import Image, ImageTk
+import traceback
+#partie de production gap analyzer
+class ProductionGapAnalyzer:
+    #fct de dictionnaire de mots
+    def __init__(self):
+        self.file_path = ""
+        self.df = None
+        self.sheet_name = ""
+        self.required_columns = {
+            'stock': ['stock', 'soh', 'inventaire', 'SOH', 'STOCK', 'stocks', 'STOCKS'],
+            'forecast': ['prevision', 'forecast', 'prévision', 'FORECAST KG', 'FORECAST ALL BL'],
+            'orders': ['commandes', 'orders', 'COMMANDES', 'ORDERS', 'ORDER'],
+            'msi': ['msi kg', 'stock minimum kg', 'MSI', 'msi']
+        }
+    #fct de chargement de fichier excel
+    def load_file(self, file_path, sheet_name):
+        try:
+            self.file_path = file_path
+            self.sheet_name = sheet_name
+            self.df = pd.read_excel(self.file_path, sheet_name=self.sheet_name, converters={'ITEM': str})
+            
+            # les 2 colonnes sont item et desc
+            column_map = {
+                'item': self.df.columns[0],
+                'desc': self.df.columns[1]
+            }
+            
+            remaining_columns = self.df.columns[2:].tolist()
+            
+            # Trouver les colonnes necessaires
+            for col_type, patterns in self.required_columns.items():
+                found_column = self.find_column(remaining_columns, patterns)
+                if not found_column:
+                    raise ValueError(f"Column '{col_type}' not found. Tried patterns: {patterns}")
+                column_map[col_type] = found_column
+            
+            # trouver les colonnes et renommer
+            self.df = self.df[list(column_map.values())]
+            self.df.columns = ['item', 'desc'] + list(self.required_columns.keys())
+            
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Loading error:\n{str(e)}\n\n{traceback.format_exc()}")
+            return False
+    #fct de recherche de colonne
+    def find_column(self, columns, patterns):
+        for col in columns:
+            col_lower = str(col).lower()
+            for pattern in patterns:
+                if pattern.lower() in col_lower:
+                    return col
+        return None
+    #fct de calcul de gap
+    def calculate_gap(self):
+        try:
+            if self.df is None:
+                raise ValueError("No data loaded. Please load a file first.")
+            
+            # Convertir les colonnes en numerique et fill les case manquantes
+            for col in ['stock', 'forecast', 'orders', 'msi']:
+                self.df[col] = pd.to_numeric(self.df[col], errors='coerce').fillna(0)
+
+            # Calculer le total de need et gap
+            self.df['total_need'] = self.df['forecast'] + self.df['orders'] + self.df['msi']
+            self.df['gap'] = (self.df['stock'] - self.df['total_need']).astype(int)
+            
+            # donnerle statue 
+            self.df['status'] = self.df['gap'].apply(
+                lambda x: "⚠️ Critical" if x < 0 else "✅ Sufficient" if x > 0 else "➖ Balanced"
+            )
+            
+            # Calculate totals
+            #eliminer la dernier colonne toujours dans le calcul de gap
+            self.df = self.df[:-1]
+            # Calculate total stock and total need  
+            total_need = self.df['total_need'].sum()
+            total_gap = self.df[self.df['gap'] < 0]['gap'].sum()  # Somme seulement des gaps negatifs
+            
+            # Create totals row
+            totals_row = pd.DataFrame({
+                'item': ['TOTAL'], 
+                'desc': [''], 
+                'stock': [None],
+                'forecast': [None],
+                'orders': [None],
+                'msi': [None],
+                'total_need': [total_need],
+                'gap': [total_gap],
+                'status': ["📊 Summary"]
+            })
+            
+            return pd.concat([self.df, totals_row], ignore_index=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Calculation error:\n{str(e)}\n\n{traceback.format_exc()}")
+            return None
+
+#classe de application
+class Application:
+    def __init__(self, master):
+        self.master = master
+        self.analyzer = ProductionGapAnalyzer()
+        self.filtered_df = None
+        self.setup_ui()
+        self.setup_styles()
+        
+    def setup_ui(self):
+        self.master.title("Production Gap Analyzer")
+        self.master.geometry("1200x800")
+        self.master.minsize(1000, 700)
+        
+        # Main container
+        self.main_frame = ttk.Frame(self.master)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Header with logo
+        self.setup_header()
+        
+        # Main menu
+        self.setup_main_menu()
+        
+        # Analysis interface (initially hidden)
+        self.setup_analysis_interface()
+        
+        # Status bar
+        self.setup_status_bar()
+        
+        # Configure menu
+        self.setup_menu_bar()
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configure styles
+        style.configure('TFrame', background='#f0f0f0')
+        style.configure('TLabel', background='#f0f0f0')
+        style.configure('Title.TLabel', font=('Arial', 16, 'bold'), background='#f0f0f0')
+        style.configure('TButton', font=('Arial', 10), padding=6)
+        style.configure('Treeview', rowheight=28, font=('Arial', 10))
+        style.configure('Treeview.Heading', font=('Arial', 10, 'bold'))
+        
+        # Map treeview selection colors
+        style.map('Treeview', 
+                 background=[('selected', '#0078d7')],
+                 foreground=[('selected', 'white')])
+
+    def setup_header(self):
+        header_frame = ttk.Frame(self.main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Add logo
+        try:
+            logo_img = Image.open("jiji code.png")
+            logo_img = logo_img.resize((80, 80), Image.LANCZOS)
+            self.logo_img = ImageTk.PhotoImage(logo_img)
+            logo_label = ttk.Label(header_frame, image=self.logo_img)
+            logo_label.pack(side=tk.LEFT, padx=10)
+        except Exception as e:
+            print(f"Logo error: {e}")
+            # if logo fails
+            ttk.Label(header_frame, text="LOGO", width=10).pack(side=tk.LEFT, padx=10)
+        
+        title_label = ttk.Label(header_frame, 
+                              text="Production Gap Analysis Tool", 
+                              style='Title.TLabel')
+        title_label.pack(side=tk.LEFT, padx=10)
+
+    def setup_main_menu(self):
+        self.menu_frame = ttk.Frame(self.main_frame)
+        self.menu_frame.pack(pady=50)
+        
+        ttk.Label(self.menu_frame, 
+                text="Main Menu", 
+                font=('Arial', 14)).pack(pady=20)
+        
+        ttk.Button(self.menu_frame, 
+                  text="Analyze Production Gap", 
+                  command=self.show_analysis_interface,
+                  width=25).pack(pady=10)
+        
+        ttk.Button(self.menu_frame, 
+                  text="Exit", 
+                  command=self.master.quit,
+                  width=25).pack(pady=10)
+
+    def setup_analysis_interface(self):
+        # selection de fichier
+        self.file_frame = ttk.LabelFrame(self.main_frame, text="File Selection")
+        
+        ttk.Button(self.file_frame, 
+                  text="Open File", 
+                  command=self.choose_file).pack(pady=5, padx=5, side=tk.LEFT)
+        
+        self.sheet_var = tk.StringVar()
+        self.sheet_dropdown = ttk.Combobox(self.file_frame, 
+                                         textvariable=self.sheet_var,
+                                         state='readonly',
+                                         width=30)
+        self.sheet_dropdown.pack(pady=5, padx=5, side=tk.LEFT)
+        
+        ttk.Button(self.file_frame, 
+                  text="Load Sheet", 
+                  command=self.load_sheet).pack(pady=5, padx=5, side=tk.LEFT)
+        
+        # filtre
+        self.filters_frame = ttk.LabelFrame(self.main_frame, text="Filters")
+        
+        # Nfiltre pour negatif gap
+        self.negative_gap_var = tk.BooleanVar()
+        ttk.Checkbutton(self.filters_frame, 
+                       text="Show negative gaps only", 
+                       variable=self.negative_gap_var,
+                       command=self.display_results).pack(side=tk.LEFT, padx=5)
+        
+        # filtre de recherche
+        ttk.Label(self.filters_frame, text="Search:").pack(side=tk.LEFT, padx=5)
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(self.filters_frame, 
+                                textvariable=self.search_var,
+                                width=30)
+        search_entry.pack(side=tk.LEFT, padx=5)
+        search_entry.bind('<Return>', lambda e: self.display_results())
+        
+        # Resultats cadre
+        self.results_frame = ttk.Frame(self.main_frame)
+        
+        # scrollbar
+        self.tree_scroll = ttk.Scrollbar(self.results_frame)
+        self.tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_tree = ttk.Treeview(
+            self.results_frame,
+            columns=("item", "desc", "stock", "total_need", "gap", "status"),
+            show="headings",
+            yscrollcommand=self.tree_scroll.set,
+            selectmode="extended"
+        )
+        self.results_tree.pack(fill=tk.BOTH, expand=True)
+        self.tree_scroll.config(command=self.results_tree.yview)
+        
+        # Configure columnes
+        columns = {
+            "item": {"text": "Item", "width": 120, "anchor": tk.CENTER},
+            "desc": {"text": "Description", "width": 250, "anchor": tk.W},
+            "stock": {"text": "Stock", "width": 100, "anchor": tk.E},
+            "total_need": {"text": "Total Need", "width": 100, "anchor": tk.E},
+            "gap": {"text": "Gap", "width": 100, "anchor": tk.E},
+            "status": {"text": "Status", "width": 150, "anchor": tk.CENTER}
+        }
+        
+        for col, config in columns.items():
+            self.results_tree.heading(col, text=config["text"], anchor=config["anchor"])
+            self.results_tree.column(col, width=config["width"], anchor=config["anchor"])
+        
+        # Tags pour style
+        self.results_tree.tag_configure('critical', foreground='red')
+        self.results_tree.tag_configure('sufficient', foreground='green4')
+        self.results_tree.tag_configure('balanced', foreground='blue')
+        self.results_tree.tag_configure('total', background='#f0f0f0', font=('Arial', 10, 'bold'))
+
+    def setup_status_bar(self):
+        self.status_var = tk.StringVar()
+        self.status_var.set("Ready")
+        
+        self.status_bar = ttk.Label(self.main_frame, 
+                                  textvariable=self.status_var,
+                                  relief=tk.SUNKEN,
+                                  anchor=tk.W)
+        self.status_bar.pack(fill=tk.X, pady=(5, 0))
+
+    def setup_menu_bar(self):
+        menubar = tk.Menu(self.master)
+        
+        #fichier menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Export Results", command=self.export_results)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.master.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        # Analysis menu
+        analysis_menu = tk.Menu(menubar, tearoff=0)
+        analysis_menu.add_command(label="Advanced Analysis", command=self.show_advanced_analysis)
+        menubar.add_cascade(label="Analysis", menu=analysis_menu)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        
+        self.master.config(menu=menubar)
+
+    def show_analysis_interface(self):
+        self.menu_frame.pack_forget()
+        self.file_frame.pack(fill=tk.X, pady=5)
+        self.filters_frame.pack(fill=tk.X, pady=5)
+        self.results_frame.pack(fill=tk.BOTH, expand=True)
+
+    def choose_file(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Excel File",
+            filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                sheets = pd.ExcelFile(file_path).sheet_names
+                self.sheet_dropdown['values'] = sheets
+                if sheets:
+                    self.sheet_var.set(sheets[0])
+                self.analyzer.file_path = file_path
+                self.status_var.set(f"File loaded: {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read file:\n{str(e)}")
+    # Load the selected sheet
+    def load_sheet(self):
+        sheet_name = self.sheet_var.get()
+        if not sheet_name:
+            messagebox.showwarning("Warning", "Please select a sheet first")
+            return
+            
+        if self.analyzer.load_file(self.analyzer.file_path, sheet_name):
+            self.status_var.set(f"Analyzing sheet: {sheet_name}")
+            self.display_results()
+        else:
+            self.status_var.set("Failed to load sheet")
+
+    def display_results(self):
+        df = self.analyzer.calculate_gap()
+        if df is not None:
+            # Apply filters
+            if self.negative_gap_var.get():
+                df = df[df['gap'] < 0]
+                
+            search_term = self.search_var.get().lower()
+            if search_term:
+                mask = (df['item'].astype(str).str.lower().str.contains(search_term) | 
+                       df['desc'].astype(str).str.lower().str.contains(search_term))
+                df = df[mask]
+            
+            self.filtered_df = df
+            
+            # Clear previous results
+            self.results_tree.delete(*self.results_tree.get_children())
+            
+            for _, row in df.iterrows():
+                # Determine tag based on gap value
+                if row['item'] == 'TOTAL':
+                    tag = 'total'
+                elif row['gap'] < 0:
+                    tag = 'critical'
+                elif row['gap'] > 0:
+                    tag = 'sufficient'
+                else:
+                    tag = 'balanced'
+                
+                # Format values
+                stock = f"{row['stock']:,.0f}" if pd.notna(row['stock']) else ""
+                need = f"{row['total_need']:,.0f}" if pd.notna(row['total_need']) else ""
+                gap = f"{row['gap']:+,.0f}" if pd.notna(row['gap']) else ""
+                
+                self.results_tree.insert("", tk.END,
+                                       values=(row['item'], row['desc'], stock, need, gap, row['status']),
+                                       tags=(tag,))
+    #fct d exportationd eresultats
+    def export_results(self):
+        if self.filtered_df is None or self.filtered_df.empty:
+            messagebox.showwarning("Warning", "No data to export")
+            return
+            
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx"), ("CSV Files", "*.csv"), ("All Files", "*.*")],
+            title="Save Analysis Results"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            if file_path.endswith('.csv'):
+                self.filtered_df.to_csv(file_path, index=False)
+            else:
+                with pd.ExcelWriter(file_path) as writer:
+                    # Detailed sheet
+                    self.filtered_df.to_excel(writer, sheet_name="Detailed Analysis", index=False)
+                    
+                    # Summary sheet
+                    summary_data = {
+                        'Metric': ['Total Stock', 'Total Need', 'Net Gap', 
+                                  'Critical Items Count', 'Critical Items Total Gap'],
+                        'Value': [
+                            self.filtered_df['stock'].sum(),
+                            self.filtered_df['total_need'].sum(),
+                            self.filtered_df['gap'].sum(),
+                            len(self.filtered_df[self.filtered_df['gap'] < 0]),
+                            self.filtered_df[self.filtered_df['gap'] < 0]['gap'].abs().sum()
+                        ],
+                        'Unit': ['kg', 'kg', 'kg', 'items', 'kg']
+                    }
+                    pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
+                    
+                    # Critical items sheet (sorted by most critical)
+                    critical_items = self.filtered_df[self.filtered_df['gap'] < 0].sort_values(by='gap')
+                    if not critical_items.empty:
+                        critical_items.to_excel(writer, sheet_name="Critical Items", index=False)
+            
+            self.status_var.set(f"Results exported to {file_path}")
+            messagebox.showinfo("Success", "Export completed successfully")
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed:\n{str(e)}")
+
+    def show_advanced_analysis(self):
+        if self.filtered_df is None:
+            messagebox.showwarning("Warning", "Please load and analyze data first")
+            return
+        
+        # Create advanced analysis window
+        adv_window = tk.Toplevel(self.master)
+        adv_window.title("Advanced Gap Analysis")
+        adv_window.geometry("800x600")
+        
+        # Calculate statistics
+        critical_df = self.filtered_df[self.filtered_df['gap'] < 0]
+        sufficient_df = self.filtered_df[self.filtered_df['gap'] > 0]
+        balanced_df = self.filtered_df[self.filtered_df['gap'] == 0]
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(adv_window)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Summary tab
+        summary_frame = ttk.Frame(notebook)
+        notebook.add(summary_frame, text="Summary")
+        
+        # Statistics table
+        stats = [
+            ("Total Stock", f"{self.filtered_df['stock'].sum():,.0f} kg"),
+            ("Total Need", f"{self.filtered_df['total_need'].sum():,.0f} kg"),
+            ("Net Gap", f"{self.filtered_df['gap'].sum():+,.0f} kg"),
+            ("", ""),
+            ("Critical Items", f"{len(critical_df)} items"),
+            ("Total Critical Gap", f"{critical_df['gap'].abs().sum():,.0f} kg"),
+            ("Average Critical Gap", f"{critical_df['gap'].abs().mean():,.0f} kg/item"),
+            ("", ""),
+            ("Sufficient Items", f"{len(sufficient_df)} items"),
+            ("Total Excess", f"{sufficient_df['gap'].sum():,.0f} kg"),
+            ("Balanced Items", f"{len(balanced_df)} items")
+        ]
+        
+        for i, (label, value) in enumerate(stats):
+            ttk.Label(summary_frame, text=label, font=('Arial', 10)).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(summary_frame, text=value, font=('Arial', 10, 'bold')).grid(row=i, column=1, sticky=tk.W, padx=5, pady=2)
+        
+        # Critical items tab
+        if not critical_df.empty:
+            critical_frame = ttk.Frame(notebook)
+            notebook.add(critical_frame, text="Critical Items")
+            
+            tree_scroll = ttk.Scrollbar(critical_frame)
+            tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            tree = ttk.Treeview(
+                critical_frame,
+                columns=("item", "desc", "gap"),
+                show="headings",
+                yscrollcommand=tree_scroll.set
+            )
+            tree.pack(fill=tk.BOTH, expand=True)
+            tree_scroll.config(command=tree.yview)
+            
+            tree.heading("item", text="Item")
+            tree.heading("desc", text="Description")
+            tree.heading("gap", text="Gap")
+            
+            tree.column("item", width=150, anchor=tk.CENTER)
+            tree.column("desc", width=300, anchor=tk.W)
+            tree.column("gap", width=100, anchor=tk.E)
+            
+            for _, row in critical_df.sort_values(by='gap').iterrows():
+                tree.insert("", tk.END, values=(row['item'], row['desc'], f"{row['gap']:,.0f}"))
+
+    def show_about(self):
+        about_text = """Production Gap Analysis Tool
+Version 1.0
+
+This tool helps analyze the gap between current stock 
+and production needs based on forecasts, orders, and 
+minimum stock requirements.
+
+Features:
+- Excel file import
+- Automatic column detection
+- Gap calculation
+- Advanced filtering
+- Detailed reporting"""
+        
+        messagebox.showinfo("About", about_text)
+
+
+def main():
+    root = tk.Tk()
+    try:
+        app = Application(root)
+        root.mainloop()
+    except Exception as e:
+        messagebox.showerror("Fatal Error", f"Application crashed:\n{str(e)}\n\n{traceback.format_exc()}")
+        root.destroy()
+
+if __name__ == "__main__":
+    main()
